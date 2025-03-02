@@ -18,6 +18,8 @@ logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
 
+app.jinja_env.cache = {}
+
 MODEL_DIR = "models"
 MODEL_PATH = os.path.join(MODEL_DIR, "stock_model.pkl")
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
