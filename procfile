@@ -1,1 +1,1 @@
-web: python stock_agent.py
+web: gunicorn stock_agent:app
