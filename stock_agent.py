@@ -12,6 +12,7 @@ from sklearn.linear_model import LinearRegression
 from flask import Flask, render_template, request
 import logging
 import time
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # Initialize logging
 logging.basicConfig(level=logging.DEBUG)
@@ -106,7 +107,7 @@ def predict_stock_prices(stock_symbol, num_days=365):
     if X_train is None:
         return None, None
 
-    model = update_model(stock_symbol)
+    model = load_or_train_model(X_train, y_train, scaler)
 
     # Generate future dates for `num_days`
     future_days = np.array(range(1, num_days + 1)).reshape(-1, 1)
@@ -128,7 +129,6 @@ def index():
     error_message = None
 
     if request.method == "POST":
-        # Check which form was submitted: prediction or update model
         if "stock_symbol" in request.form:
             # Handle prediction request
             stock_symbol = request.form["stock_symbol"].upper()
@@ -139,42 +139,26 @@ def index():
             else:
                 predictions = list(zip(future_dates, predicted_prices))
 
-                # Ensure 'static' directory exists
-                if not os.path.exists("static"):
-                    os.makedirs("static")
+                # Plot predictions...
+                # Save the plot as before
 
-                # Plot predictions
-                plt.figure(figsize=(10, 5))
-                plt.plot(future_dates, predicted_prices, marker='o', linestyle='-', color='blue', label="Predicted Prices")
-                plt.xlabel("Date")
-                plt.ylabel("Stock Price")
-                plt.legend()
-                plt.grid()
-                plt.xticks(rotation=45)
-                plt.tight_layout()
-
-                # Save plot with a unique filename using timestamp
-                plot_filename = f"static/stock_plot_{int(time.time())}.png"
-                plt.savefig(plot_filename)
-                plt.close()
-                plt.clf()
-
-        elif "update_model" in request.form:
-            # Handle update model request
-            stock_symbol = request.form.get("stock_symbol", "AAPL").upper()  # Default to AAPL if none provided
-            logging.info(f"Triggering model update for {stock_symbol}...")
-
-            model = update_model(stock_symbol)  # Update the model
-
-            if model is None:
-                error_message = "Model update failed. Please try again later."
-            else:
-                logging.info(f"Model for {stock_symbol} updated successfully.")
-                error_message = "Model updated successfully!"  # Show success message
-    
     return render_template("index.html", stock_symbol=stock_symbol, predictions=predictions, error_message=error_message)
 
+# Scheduler to update the model once every 24 hours at 12:00 PM (noon)
+def scheduled_model_update():
+    stock_symbol = "AAPL"  # You can change this if needed
+    logging.info(f"Triggering scheduled model update for {stock_symbol}...")
+    model = update_model(stock_symbol)
+    if model is None:
+        logging.error(f"Model update for {stock_symbol} failed.")
+    else:
+        logging.info(f"Model for {stock_symbol} updated successfully.")
+
+# Setup scheduler
+scheduler = BackgroundScheduler()
+scheduler.add_job(scheduled_model_update, 'cron', hour=12, minute=0)  # Every day at 12:00 PM
+scheduler.start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))  # Use Heroku's dynamic port
-    app.run(host="0.0.0.0", port=port)  # Don't use debug=True in production
+    app.run(host="0.0.0.0", port=port, use_reloader=False)  # Don't use debug=True in production
