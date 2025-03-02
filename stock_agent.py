@@ -1,55 +1,68 @@
-import os
-import pickle
+import logging
+import yfinance as yf
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')  # Use non-GUI backend
-import matplotlib.pyplot as plt
-import yfinance as yf
-from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.linear_model import LinearRegression
+import pickle
 from flask import Flask, render_template, request
-import logging
-import time
-from apscheduler.schedulers.background import BackgroundScheduler
 
-# Initialize logging
+# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 
-app = Flask(__name__, template_folder='Templates')
+app = Flask(__name__)
 
-app.jinja_env.cache = {}
-
-MODEL_DIR = "models"
-MODEL_PATH = os.path.join(MODEL_DIR, "stock_model.pkl")
-SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
+# Global model variable
+model = None
 
 def get_stock_data(stock_symbol):
     """Fetch historical stock data using Yahoo Finance."""
     try:
         stock = yf.Ticker(stock_symbol)
         data = stock.history(period="6mo")  # Fetch last 6 months of data
+        
+        # Log if no data was found
         if data.empty:
             raise ValueError(f"No data found for {stock_symbol}")
+        
+        # Log the raw data for better visibility
+        logging.debug(f"Raw data fetched for {stock_symbol}: {data.head()}")
+        
+        # Processing data
         data.reset_index(inplace=True)
         data['Date'] = pd.to_datetime(data['Date'])
-        logging.debug(f"Fetched data for {stock_symbol}: {data.head()}")
+        
+        # Log the processed data
+        logging.debug(f"Processed data for {stock_symbol}: {data.head()}")
+        
         return data
     except Exception as e:
         logging.error(f"Error fetching data: {e}")
         return None
+
 
 def prepare_data(stock_symbol):
     """Prepare data for model training and prediction."""
     stock_data = get_stock_data(stock_symbol)
     
     if stock_data is None:
+        logging.error(f"Failed to get stock data for {stock_symbol}. Returning None.")
         return None, None, None, None
 
     # Feature selection
     stock_data['Day'] = stock_data['Date'].dt.day
-    X = stock_data[['Day']]
+    stock_data['Prev Close'] = stock_data['Close'].shift(1)
+    stock_data['Moving Average'] = stock_data['Close'].rolling(window=5).mean()
+    
+    # Log the features after engineering
+    logging.debug(f"Features after engineering: {stock_data[['Day', 'Prev Close', 'Moving Average']].head()}")
+    
+    stock_data.dropna(inplace=True)  # Remove any rows with NaN values
+    
+    logging.debug(f"Cleaned features after dropping NaN: {stock_data[['Day', 'Prev Close', 'Moving Average']].head()}")
+    
+    X = stock_data[['Day', 'Prev Close', 'Moving Average']]
     y = stock_data['Close']
 
     # Scaling
@@ -61,104 +74,85 @@ def prepare_data(stock_symbol):
 
     return X_train, y_train, scaler, stock_data
 
+
 def load_or_train_model(X_train, y_train, scaler):
-    """Load existing model or train a new one if not found."""
-    if os.path.exists(MODEL_PATH):
-        with open(MODEL_PATH, "rb") as model_file:
-            model = pickle.load(model_file)
-        with open(SCALER_PATH, "rb") as scaler_file:
-            scaler = pickle.load(scaler_file)
-        logging.info("Loaded existing model from disk.")
-    else:
+    """Load an existing model or train a new one."""
+    global model
+    if model is None:
+        logging.info("Training new model...")
         model = LinearRegression()
         model.fit(X_train, y_train)
-
-        # Ensure model directory exists
-        if not os.path.exists(MODEL_DIR):
-            os.makedirs(MODEL_DIR)
-
-        # Save model and scaler
-        with open(MODEL_PATH, "wb") as model_file:
-            pickle.dump(model, model_file)
-        with open(SCALER_PATH, "wb") as scaler_file:
-            pickle.dump(scaler, scaler_file)
-        logging.info("Trained and saved a new model.")
+        
+        # Save the model for future use
+        with open("model.pkl", "wb") as f:
+            pickle.dump(model, f)
+            pickle.dump(scaler, f)
+    else:
+        logging.info("Loading existing model...")
+        with open("model.pkl", "rb") as f:
+            model = pickle.load(f)
+            scaler = pickle.load(f)
+    
     return model
 
-def update_model(stock_symbol):
-    """Update the existing model with new stock data."""
-    X_train, y_train, scaler, stock_data = prepare_data(stock_symbol)
-    if X_train is None:
-        return None
-    
-    model = load_or_train_model(X_train, y_train, scaler)
-    model.fit(X_train, y_train)  # Retrain model with new data
-    
-    # Save updated model
-    with open(MODEL_PATH, "wb") as model_file:
-        pickle.dump(model, model_file)
-    logging.info("Updated and saved model with new data.")
-    return model
 
 def predict_stock_prices(stock_symbol, num_days=365):
     """Use the model to predict stock prices for the next specified number of days."""
-    X_train, y_train, scaler, stock_data = prepare_data(stock_symbol)
+    try:
+        X_train, y_train, scaler, stock_data = prepare_data(stock_symbol)
 
-    if X_train is None:
+        if X_train is None:
+            logging.error(f"Failed to prepare data for prediction for {stock_symbol}.")
+            return None, None
+
+        model = load_or_train_model(X_train, y_train, scaler)
+
+        # Generate future dates for `num_days`
+        future_days = np.array(range(1, num_days + 1)).reshape(-1, 1)
+
+        # Simulate the 'Prev Close' and 'Moving Average' for future days
+        last_row = stock_data.iloc[-1]
+        prev_close = last_row['Close']
+        moving_avg = last_row['Moving Average']
+        
+        # Simulate the missing features for future days
+        future_data = np.array([[day, prev_close, moving_avg] for day in range(1, num_days + 1)])
+        
+        # Scale the future data with the same scaler used during training
+        future_days_scaled = scaler.transform(future_data)
+
+        # Predict
+        predictions = model.predict(future_days_scaled)
+        
+        # Log the predictions to verify
+        logging.debug(f"Predictions for {stock_symbol}: {predictions[:5]}")  # Log first 5 predictions
+
+        # Create future date labels
+        last_date = stock_data['Date'].max()
+        future_dates = [last_date + pd.Timedelta(days=i) for i in range(1, num_days + 1)]
+
+        return future_dates, predictions
+
+    except Exception as e:
+        logging.error(f"Error in predicting stock prices for {stock_symbol}: {e}")
         return None, None
 
-    model = load_or_train_model(X_train, y_train, scaler)
-
-    # Generate future dates for `num_days`
-    future_days = np.array(range(1, num_days + 1)).reshape(-1, 1)
-    future_days_scaled = scaler.transform(future_days)
-
-    # Predict
-    predictions = model.predict(future_days_scaled)
-
-    # Create future date labels
-    last_date = stock_data['Date'].max()
-    future_dates = [last_date + pd.Timedelta(days=i) for i in range(1, num_days + 1)]
-
-    return future_dates, predictions
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    predictions = None
-    stock_symbol = None
-    error_message = None
-
     if request.method == "POST":
-        if "stock_symbol" in request.form:
-            # Handle prediction request
-            stock_symbol = request.form["stock_symbol"].upper()
-            future_dates, predicted_prices = predict_stock_prices(stock_symbol)
+        stock_symbol = request.form["stock_symbol"]
+        future_dates, predicted_prices = predict_stock_prices(stock_symbol)
 
-            if future_dates is None:
-                error_message = "Stock symbol not found or no data available."
-            else:
-                predictions = list(zip(future_dates, predicted_prices))
+        if future_dates is None or predicted_prices is None:
+            return f"Could not retrieve data or predict for stock symbol: {stock_symbol}"
+        
+        # Prepare data for rendering in the template
+        predictions_data = list(zip(future_dates, predicted_prices))
+        return render_template("index.html", predictions=predictions_data)
 
-                # Plot predictions...
-                # Save the plot as before
+    return render_template("index.html")
 
-    return render_template("index.html", stock_symbol=stock_symbol, predictions=predictions, error_message=error_message)
-
-# Scheduler to update the model once every 24 hours at 12:00 PM (noon)
-def scheduled_model_update():
-    stock_symbol = "AAPL"  # You can change this if needed
-    logging.info(f"Triggering scheduled model update for {stock_symbol}...")
-    model = update_model(stock_symbol)
-    if model is None:
-        logging.error(f"Model update for {stock_symbol} failed.")
-    else:
-        logging.info(f"Model for {stock_symbol} updated successfully.")
-
-# Setup scheduler
-scheduler = BackgroundScheduler()
-scheduler.add_job(scheduled_model_update, 'cron', hour=12, minute=0)  # Every day at 12:00 PM
-scheduler.start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Use Heroku's dynamic port
-    app.run(host="0.0.0.0", port=port, use_reloader=False)  # Don't use debug=True in production
+    app.run(debug=True)
