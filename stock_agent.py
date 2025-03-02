@@ -16,7 +16,7 @@ import time
 # Initialize logging
 logging.basicConfig(level=logging.DEBUG)
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='Templates')
 
 app.jinja_env.cache = {}
 
