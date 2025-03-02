@@ -11,7 +11,7 @@ from flask import Flask, render_template, request
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='Templates')
 
 # Global model variable
 model = None
